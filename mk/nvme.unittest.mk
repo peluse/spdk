@@ -40,8 +40,9 @@ C_SRCS = $(TEST_FILE) $(OTHER_FILES)
 
 CFLAGS += -I$(SPDK_ROOT_DIR)/lib
 CFLAGS += -I$(SPDK_ROOT_DIR)/test
+LDFLAGS += -Wl,--wrap,pthread_mutexattr_init -Wl,--wrap,pthread_mutex_init
 
-SPDK_LIB_LIST = util log
+SPDK_LIB_LIST = util log cunit
 
 LIBS += -lcunit $(SPDK_LIB_LINKER_ARGS)
 

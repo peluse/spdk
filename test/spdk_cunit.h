@@ -53,5 +53,9 @@
 	} while (0)
 
 int spdk_cunit_print_results(const char *filename);
+int __real_pthread_mutexattr_init(pthread_mutexattr_t *attr);
+int __real_pthread_mutex_init(pthread_mutex_t *mtx, const pthread_mutexattr_t *attr);
+int __wrap_pthread_mutexattr_init(pthread_mutexattr_t *attr);
+int __wrap_pthread_mutex_init(pthread_mutex_t *mtx, const pthread_mutexattr_t *attr);
 
 #endif /* SPDK_CUNIT_H */

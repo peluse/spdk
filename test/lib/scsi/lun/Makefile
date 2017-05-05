@@ -37,6 +37,7 @@ include $(SPDK_ROOT_DIR)/mk/spdk.app.mk
 
 SPDK_LIB_LIST = cunit log
 
+LDFLAGS += -Wl,--wrap,pthread_mutexattr_init -Wl,--wrap,pthread_mutex_init
 CFLAGS += -I$(SPDK_ROOT_DIR)/test
 CFLAGS += -I$(SPDK_ROOT_DIR)/lib/scsi
 LIBS += $(SPDK_LIB_LINKER_ARGS)

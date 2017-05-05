@@ -38,6 +38,11 @@
 #include "nvme/nvme.c"
 
 #include "lib/test_env.c"
+#include <signal.h>
+
+extern int ut_fake_pthread_mutexattr_init;
+extern int ut_fake_pthread_mutex_init;
+extern int g_nvme_driver_timeout_us;
 
 int
 spdk_pci_nvme_enumerate(spdk_pci_enum_cb enum_cb, void *enum_ctx)
@@ -61,11 +66,12 @@ spdk_nvme_transport_available(enum spdk_nvme_transport_type trtype)
 	return true;
 }
 
+void *ut_fake_nvme_transport_ctrlr_construct = NULL;
 struct spdk_nvme_ctrlr *nvme_transport_ctrlr_construct(const struct spdk_nvme_transport_id *trid,
 		const struct spdk_nvme_ctrlr_opts *opts,
 		void *devhandle)
 {
-	return NULL;
+	return ut_fake_nvme_transport_ctrlr_construct;
 }
 
 int
@@ -77,9 +83,13 @@ nvme_transport_ctrlr_scan(const struct spdk_nvme_transport_id *trid,
 	return 0;
 }
 
+int ut_destruct_flag = 0;
+
 void
 nvme_ctrlr_destruct(struct spdk_nvme_ctrlr *ctrlr)
 {
+	// caller must clear to reset test
+	ut_destruct_flag = 1;
 }
 
 int
@@ -138,10 +148,392 @@ nvme_ctrlr_proc_put_ref(struct spdk_nvme_ctrlr *ctrlr)
 	return;
 }
 
+int ut_ctrlr_ref_count = 0;
+
 int
 nvme_ctrlr_get_ref_count(struct spdk_nvme_ctrlr *ctrlr)
 {
-	return 0;
+	// caller must set to desired value
+	return ut_ctrlr_ref_count;
+}
+
+static void
+test_spdk_nvme_detach(void)
+{
+	int rc = 1;
+	struct spdk_nvme_ctrlr ctrlr;
+	struct nvme_driver dummy;
+	g_spdk_nvme_driver = &dummy;
+
+	// setup enough global stuff to get coverage
+	TAILQ_INIT(&dummy.attached_ctrlrs);
+	TAILQ_INSERT_TAIL(&dummy.attached_ctrlrs, &ctrlr, tailq);
+	CU_ASSERT_FATAL(pthread_mutex_init(&dummy.lock, NULL) == 0);
+	ut_ctrlr_ref_count = 0;
+
+	rc = spdk_nvme_detach(&ctrlr);
+	CU_ASSERT(ut_destruct_flag == 1);
+	CU_ASSERT(rc == 0);
+
+	// additional branch coverage
+	ut_ctrlr_ref_count = 1;
+	ut_destruct_flag = 0;
+	rc = 1;
+
+	rc = spdk_nvme_detach(&ctrlr);
+	CU_ASSERT(ut_destruct_flag == 0);
+	CU_ASSERT(rc == 0);
+}
+
+static void
+test_nvme_completion_poll_cb(void)
+{
+	struct nvme_completion_poll_status status;
+	struct spdk_nvme_cpl cpl;
+
+	memset(&status, 0x0, sizeof(struct nvme_completion_poll_status));
+	memset(&cpl, 0xff, sizeof(struct spdk_nvme_cpl));
+
+	nvme_completion_poll_cb(&status, &cpl);
+	CU_ASSERT(status.done == true);
+	CU_ASSERT(memcmp(&cpl, &status.cpl,
+			 sizeof(struct spdk_nvme_cpl)) == 0);
+}
+
+static void
+test_nvme_allocate_request(void)
+{
+	struct spdk_nvme_qpair qpair = {0};
+	struct nvme_payload payload = {0};
+	uint32_t payload_size = 0;
+	spdk_nvme_cmd_cb cb_fn = NULL;
+	void *cb_arg = NULL;
+	struct nvme_request *req;
+	struct nvme_request dummy_req, match_req;
+
+	STAILQ_INIT(&qpair.free_req);
+	STAILQ_INIT(&qpair.queued_req);
+
+	// empty queue
+	req = nvme_allocate_request(&qpair, &payload, payload_size,
+				    cb_fn, cb_arg);
+	CU_ASSERT(req == NULL);
+
+	// put a dummy on the queue, make sure it matches correctly upon return
+	memset(&dummy_req, 0xff, sizeof(struct nvme_request));
+	memset(&match_req, 0xff, sizeof(struct nvme_request));
+	memset(&match_req, 0, offsetof(struct nvme_request, children));
+	match_req.cb_fn = cb_fn;
+	match_req.cb_arg = cb_arg;
+	match_req.payload = payload;
+	match_req.payload_size = payload_size;
+	match_req.qpair = &qpair;
+	match_req.pid = getpid();
+	STAILQ_INSERT_HEAD(&qpair.free_req, &dummy_req, stailq);
+
+	req = nvme_allocate_request(&qpair, &payload, payload_size,
+				    cb_fn, cb_arg);
+	CU_ASSERT(req != NULL);
+	CU_ASSERT(memcmp(req, &match_req,
+			 sizeof(struct nvme_request)) == 0);
+}
+
+static void
+test_nvme_allocate_request_contig(void)
+{
+	struct spdk_nvme_qpair qpair = {0};
+	void *buffer = NULL;
+	uint32_t payload_size = 0;
+	spdk_nvme_cmd_cb cb_fn = NULL;
+	void *cb_arg = NULL;
+	struct nvme_request *req = NULL;
+	struct nvme_request dummy_req, match_req;
+
+	// put a dummy on the queue, make sure it matches correctly upon return
+	STAILQ_INIT(&qpair.free_req);
+	STAILQ_INIT(&qpair.queued_req);
+	memset(&dummy_req, 0xff, sizeof(struct nvme_request));
+	memset(&match_req, 0xff, sizeof(struct nvme_request));
+	memset(&match_req, 0, offsetof(struct nvme_request, children));
+	match_req.payload.type = NVME_PAYLOAD_TYPE_CONTIG;
+	match_req.payload.u.sgl.next_sge_fn = 0;
+	match_req.qpair = &qpair;
+	match_req.pid = getpid();
+	STAILQ_INSERT_HEAD(&qpair.free_req, &dummy_req, stailq);
+
+	req = nvme_allocate_request_contig(&qpair, buffer, payload_size,
+					   cb_fn, cb_arg);
+	CU_ASSERT(req != NULL);
+	req->payload.u.sgl.next_sge_fn = 0;
+	CU_ASSERT(memcmp(req, &match_req,
+			 sizeof(struct nvme_request)) == 0);
+}
+
+static void
+test_nvme_allocate_request_null(void)
+{
+	struct spdk_nvme_qpair qpair = {0};
+	spdk_nvme_cmd_cb cb_fn = NULL;
+	void *cb_arg = NULL;
+	struct nvme_request *req = NULL;
+	struct nvme_request dummy_req, match_req;
+
+	// put a dummy on the queue, make sure it matches correctly upon return
+	STAILQ_INIT(&qpair.free_req);
+	STAILQ_INIT(&qpair.queued_req);
+	memset(&dummy_req, 0xff, sizeof(struct nvme_request));
+	memset(&match_req, 0xff, sizeof(struct nvme_request));
+	memset(&match_req, 0, offsetof(struct nvme_request, children));
+	match_req.payload.type = NVME_PAYLOAD_TYPE_CONTIG;
+	match_req.payload.u.sgl.next_sge_fn = 0;
+	match_req.qpair = &qpair;
+	match_req.pid = getpid();
+	STAILQ_INSERT_HEAD(&qpair.free_req, &dummy_req, stailq);
+
+	req = nvme_allocate_request_null(&qpair, cb_fn, cb_arg);
+	CU_ASSERT(req != NULL);
+	req->payload.u.sgl.next_sge_fn = 0;
+	CU_ASSERT(memcmp(req, &match_req,
+			 sizeof(struct nvme_request)) == 0);
+
+}
+
+int ut_dummy_cb = 0;
+static void
+dummy_cb(void *user_cb_arg, struct spdk_nvme_cpl *cpl)
+{
+	ut_dummy_cb  = 1;
+}
+
+static void
+test_nvme_user_copy_cmd_complete(void)
+{
+	struct nvme_request req = {0};
+	struct spdk_nvme_cpl cpl = {0};
+	int test_data = 0xdeadbeef;
+	int buff_size = sizeof(test_data);
+
+	// without user buffer
+	req.user_cb_fn = (void *)dummy_cb;
+	ut_dummy_cb = 0;
+
+	nvme_user_copy_cmd_complete(&req, &cpl);
+	CU_ASSERT(ut_dummy_cb == 1);
+
+	// with user buffer
+	req.user_buffer = malloc(buff_size);
+	CU_ASSERT(req.user_buffer != NULL);
+	memset(req.user_buffer, 0, buff_size);
+	req.payload_size = buff_size;
+	req.payload.type = NVME_PAYLOAD_TYPE_CONTIG;
+	req.payload.u.contig = malloc(buff_size); // freed in code under test
+	memcpy(req.payload.u.contig, &test_data, buff_size);
+	CU_ASSERT(req.payload.u.contig != NULL);
+	req.cmd.opc = SPDK_NVME_OPC_GET_LOG_PAGE;
+	req.pid = getpid();
+
+	ut_dummy_cb = 0;
+	nvme_user_copy_cmd_complete(&req, &cpl);
+	CU_ASSERT(memcmp(req.user_buffer, &test_data, buff_size) == 0);
+	CU_ASSERT(ut_dummy_cb == 1);
+	free(req.user_buffer);
+}
+
+static void
+test_nvme_allocate_request_user_copy(void)
+{
+	struct spdk_nvme_qpair qpair = {0};
+	void *buffer = NULL;
+	uint32_t payload_size = 0;
+	spdk_nvme_cmd_cb cb_fn = {0};
+	void *cb_arg = NULL;
+	bool host_to_controller = true;
+	struct nvme_request *req;
+	struct nvme_request dummy_req;
+	int test_data = 0xdeadbeef;
+	int buff_size = sizeof(test_data);
+
+	// no buffer or valid payload size, early NULL return
+	req = nvme_allocate_request_user_copy(&qpair, buffer, payload_size, cb_fn,
+					      cb_arg, host_to_controller);
+	CU_ASSERT(req == NULL);
+
+	// good buffer and valid payload size
+	buffer = malloc(buff_size);
+	CU_ASSERT(buffer != NULL);
+	memcpy(buffer, &test_data, buff_size);
+	payload_size = buff_size;
+	// put a dummy on the queue
+	STAILQ_INIT(&qpair.free_req);
+	STAILQ_INIT(&qpair.queued_req);
+	memset(&dummy_req, 0, sizeof(struct nvme_request));
+	STAILQ_INSERT_HEAD(&qpair.free_req, &dummy_req, stailq);
+
+	req = nvme_allocate_request_user_copy(&qpair, buffer, payload_size, cb_fn,
+					      cb_arg, host_to_controller);
+	CU_ASSERT(req->user_cb_fn == cb_fn);
+	CU_ASSERT(req->user_cb_arg == cb_arg);
+	CU_ASSERT(req->user_buffer == buffer);
+	CU_ASSERT(req->cb_arg == req);
+	CU_ASSERT(memcmp(req->payload.u.contig, buffer, sizeof(buff_size)) == 0);
+
+	// same thing but additinoal path coverage (no copy)
+	host_to_controller = false;
+	memset(&dummy_req, 0, sizeof(struct nvme_request));
+	STAILQ_INSERT_HEAD(&qpair.free_req, &dummy_req, stailq);
+
+	req = nvme_allocate_request_user_copy(&qpair, buffer, payload_size, cb_fn,
+					      cb_arg, host_to_controller);
+	CU_ASSERT(req->user_cb_fn == cb_fn);
+	CU_ASSERT(req->user_cb_arg == cb_arg);
+	CU_ASSERT(req->user_buffer == buffer);
+	CU_ASSERT(req->cb_arg == req);
+	CU_ASSERT(memcmp(req->payload.u.contig, buffer, sizeof(buff_size)) != 0);
+
+	// good buffer and valid payload size but lets make spdk_zmalloc fail
+	payload_size = 0xffffffff;
+	req = nvme_allocate_request_user_copy(&qpair, buffer, payload_size, cb_fn,
+					      cb_arg, host_to_controller);
+	CU_ASSERT(req == NULL);
+}
+
+static void
+test_nvme_free_request(void)
+{
+	struct nvme_request dummy_req = {0};
+	struct nvme_request *return_req;
+
+	// init req qpair and put a dummy on it, make sure it gets
+	// moved to freeq
+	memset(&dummy_req, 0x5a, sizeof(struct spdk_nvme_cmd));
+	dummy_req.qpair = malloc(sizeof(*dummy_req.qpair));
+	STAILQ_INIT(&dummy_req.qpair->free_req);
+
+	nvme_free_request(&dummy_req);
+	return_req = STAILQ_FIRST(&dummy_req.qpair->free_req);
+	CU_ASSERT(memcmp(return_req, &dummy_req,
+			 sizeof(struct spdk_nvme_cmd)) == 0);
+
+}
+
+static void
+test_nvme_robust_mutex_init_shared(void)
+{
+	pthread_mutex_t mtx;
+	int rc = 0;
+
+	rc = nvme_robust_mutex_init_shared(&mtx);
+	CU_ASSERT(rc == 0);
+
+	ut_fake_pthread_mutexattr_init = -1;
+	rc = nvme_robust_mutex_init_shared(&mtx);
+	CU_ASSERT(rc == ut_fake_pthread_mutexattr_init);
+	ut_fake_pthread_mutexattr_init = 0;
+
+	ut_fake_pthread_mutex_init = -1;
+	rc = nvme_robust_mutex_init_shared(&mtx);
+	CU_ASSERT(rc == ut_fake_pthread_mutex_init);
+	ut_fake_pthread_mutex_init = 0;
+}
+
+
+static void
+test_nvme_driver_init(void)
+{
+	int rc;
+	struct nvme_driver *orig_nvme_driver;
+
+	g_nvme_driver_timeout_us = 100;
+
+	orig_nvme_driver = g_spdk_nvme_driver;
+	ut_process_is_primary = true;
+	g_spdk_nvme_driver->initialized = true;
+	rc = nvme_driver_init();
+	CU_ASSERT(rc == 0);
+
+	// additional branch coverage
+	g_spdk_nvme_driver = NULL;
+	ut_fail_memzone_reserve = true;
+	ut_process_is_primary = true;
+	rc = nvme_driver_init();
+	CU_ASSERT(rc == -1);
+
+	// additional branch coverage
+	ut_process_is_primary = false;
+	g_spdk_nvme_driver = NULL;
+	rc = nvme_driver_init();
+	CU_ASSERT(rc == -1);
+
+	// additional branch coverage
+	ut_process_is_primary = false;
+	g_spdk_nvme_driver = orig_nvme_driver;
+	ut_fake_spdk_memzone_lookup = g_spdk_nvme_driver;
+	rc = nvme_driver_init();
+	CU_ASSERT(rc == 0);
+
+	// additional branch coverage
+	ut_process_is_primary = false;
+	g_spdk_nvme_driver = orig_nvme_driver;
+	ut_fake_spdk_memzone_lookup = g_spdk_nvme_driver;
+	g_spdk_nvme_driver->initialized = false;
+	rc = nvme_driver_init();
+	CU_ASSERT(rc == -1);
+
+	// additional branch coverage
+	ut_process_is_primary = true;
+	g_spdk_nvme_driver->initialized = false;
+	ut_fail_memzone_reserve = false;
+	g_spdk_nvme_driver = NULL;
+	ut_fake_pthread_mutexattr_init = -1;
+	rc = nvme_driver_init();
+	CU_ASSERT(rc != 0);
+
+	// additional branch coverage
+	ut_process_is_primary = true;
+	g_spdk_nvme_driver->initialized = false;
+	ut_fail_memzone_reserve = false;
+	g_spdk_nvme_driver = NULL;
+	ut_fake_pthread_mutexattr_init = 0;
+	CU_ASSERT(rc != 0)
+
+	// additional branch coverage
+	rc = nvme_driver_init();
+	CU_ASSERT(g_spdk_nvme_driver->initialized == false);
+	CU_ASSERT(rc == 0);
+}
+
+bool ut_fail_dummy_probe_cb = false;
+static bool
+dummy_probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
+	       struct spdk_nvme_ctrlr_opts *opts)
+{
+	return !ut_fail_dummy_probe_cb;
+}
+
+static void
+test_nvme_ctrlr_probe(void)
+{
+	int rc = 0;
+	const struct spdk_nvme_transport_id *trid = NULL;
+	void *devhandle = NULL;
+	spdk_nvme_probe_cb probe_cb = dummy_probe_cb;
+	void *cb_ctx = NULL;
+
+	ut_fail_dummy_probe_cb = true;
+	rc = nvme_ctrlr_probe(trid, devhandle, probe_cb, cb_ctx);
+	CU_ASSERT(rc == 1);
+
+	// additional path coverage
+	ut_fail_dummy_probe_cb = false;
+	rc = nvme_ctrlr_probe(trid, devhandle, probe_cb, cb_ctx);
+	CU_ASSERT(rc == -1);
+
+	// additional path coverage
+	ut_fail_dummy_probe_cb = false;
+	// this can be any valid address for this test
+	ut_fake_nvme_transport_ctrlr_construct = &ut_fake_nvme_transport_ctrlr_construct;
+	rc = nvme_ctrlr_probe(trid, devhandle, probe_cb, cb_ctx);
+	CU_ASSERT(rc == 0);
 }
 
 static void
@@ -296,8 +688,8 @@ test_spdk_nvme_transport_id_parse_adrfam(void)
 
 int main(int argc, char **argv)
 {
-	CU_pSuite	suite = NULL;
-	unsigned int	num_failures;
+	CU_pSuite   suite = NULL;
+	unsigned int    num_failures;
 
 	if (CU_initialize_registry() != CUE_SUCCESS) {
 		return CU_get_error();
@@ -310,12 +702,36 @@ int main(int argc, char **argv)
 	}
 
 	if (
-		CU_add_test(suite, "test_opc_data_transfer", test_opc_data_transfer) == NULL ||
+		CU_add_test(suite, "test_opc_data_transfer",
+			    test_opc_data_transfer) == NULL ||
 		CU_add_test(suite, "test_spdk_nvme_transport_id_parse_trtype",
 			    test_spdk_nvme_transport_id_parse_trtype) == NULL ||
 		CU_add_test(suite, "test_spdk_nvme_transport_id_parse_adrfam",
 			    test_spdk_nvme_transport_id_parse_adrfam) == NULL ||
-		CU_add_test(suite, "test_trid_parse", test_trid_parse) == NULL
+		CU_add_test(suite, "test_trid_parse",
+			    test_trid_parse) == NULL ||
+		CU_add_test(suite, "test_spdk_nvme_detach",
+			    test_spdk_nvme_detach) == NULL ||
+		CU_add_test(suite, "test_nvme_completion_poll_cb",
+			    test_nvme_completion_poll_cb) == NULL ||
+		CU_add_test(suite, "test_nvme_allocate_request",
+			    test_nvme_allocate_request) == NULL ||
+		CU_add_test(suite, "test_nvme_allocate_request_contig",
+			    test_nvme_allocate_request_contig) == NULL ||
+		CU_add_test(suite, "test_nvme_allocate_request_null",
+			    test_nvme_allocate_request_null) == NULL ||
+		CU_add_test(suite, "test_nvme_user_copy_cmd_complete",
+			    test_nvme_user_copy_cmd_complete) == NULL ||
+		CU_add_test(suite, "test_nvme_allocate_request_user_copy",
+			    test_nvme_allocate_request_user_copy) == NULL ||
+		CU_add_test(suite, "test_nvme_free_request",
+			    test_nvme_free_request) == NULL ||
+		CU_add_test(suite, "test_nvme_robust_mutex_init_shared",
+			    test_nvme_robust_mutex_init_shared) == NULL ||
+		CU_add_test(suite, "test_nvme_driver_init",
+			    test_nvme_driver_init) == NULL ||
+		CU_add_test(suite, "test_nvme_ctrlr_probe",
+			    test_nvme_ctrlr_probe) == NULL
 	) {
 		CU_cleanup_registry();
 		return CU_get_error();
