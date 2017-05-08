@@ -5,6 +5,29 @@
 
 set -xe
 
+# setup local unit test coverage if cov is available
+src=$(readlink -f $(dirname $0))
+out=$PWD
+cd $src
+if hash lcov; then
+	if [ $EUID -ne 0 ]; then
+		echo "$0 must be run as root for coverage"
+		exit 1
+	fi
+	export LCOV_OPTS="
+		--rc lcov_branch_coverage=1
+		--rc lcov_function_coverage=1
+		--rc genhtml_branch_coverage=1
+		--rc genhtml_function_coverage=1
+		--rc genhtml_legend=1
+		--rc geninfo_all_blocks=1
+		"
+	export LCOV="lcov $LCOV_OPTS --no-external"
+	# zero out coverage data
+	$LCOV -q -c -i -t "Baseline" -d $src -o cov_base.info
+fi
+
+
 $valgrind test/lib/blob/blob_ut/blob_ut
 
 $valgrind test/lib/blobfs/blobfs_ut/blobfs_ut
@@ -51,6 +74,15 @@ test/lib/iscsi/pdu/pdu
 $valgrind test/lib/util/bit_array/bit_array_ut
 $valgrind test/lib/util/io_channel/io_channel_ut
 $valgrind test/lib/util/string/string_ut
+
+# local unit test coverage
+if hash lcov; then
+	#generate coverage data and combine with baseline
+	$LCOV -q -c -d $src -t "$(hostname)" -o cov_test.info
+	$LCOV -q -a cov_base.info -a cov_test.info -o cov_total.info
+	$LCOV -q -a cov_total.info -o cov_unit.info
+	genhtml cov_unit.info --output-directory .
+fi
 
 set +x
 
