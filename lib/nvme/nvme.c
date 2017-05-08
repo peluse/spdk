@@ -255,9 +255,18 @@ nvme_driver_init(void)
 
 		/* The unique named memzone already reserved by the primary process. */
 		if (g_spdk_nvme_driver != NULL) {
+			int ms_waited = 0;
+
 			/* Wait the nvme driver to get initialized. */
-			while (g_spdk_nvme_driver->initialized == false) {
+			do {
 				nvme_delay(1000);
+				ms_waited++;
+			} while ((ms_waited < 30) &&
+					(g_spdk_nvme_driver->initialized == false));
+			if (g_spdk_nvme_driver->initialized == false) {
+				SPDK_ERRLOG("timeout waiting for driver to iit\n");
+
+				return -1;
 			}
 		} else {
 			SPDK_ERRLOG("primary process is not started yet\n");
