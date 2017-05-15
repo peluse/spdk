@@ -39,6 +39,8 @@ SPDK_LIB_LIST = cunit log
 
 CFLAGS += -I$(SPDK_ROOT_DIR)/test
 CFLAGS += -I$(SPDK_ROOT_DIR)/lib/scsi
+LDFLAGS += -Wl,--wrap,pthread_mutexattr_init -Wl,--wrap,pthread_mutex_init
+
 LIBS += $(SPDK_LIB_LINKER_ARGS)
 LIBS += -lcunit
 

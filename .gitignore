@@ -12,6 +12,11 @@
 *.pyc
 *.so
 *.swp
+*.html
+*.info
+*.png
+*.css
+*.DS_Store
 tags
 cscope.out
 dpdk-*

@@ -35,6 +35,27 @@
 
 #include "spdk_cunit.h"
 
+int ut_fake_pthread_mutexattr_init = 0;
+int ut_fake_pthread_mutex_init = 0;
+
+int
+__wrap_pthread_mutexattr_init(pthread_mutexattr_t *attr)
+{
+	if (ut_fake_pthread_mutexattr_init == 0)
+		return __real_pthread_mutexattr_init(attr);
+	else
+		return ut_fake_pthread_mutexattr_init;
+}
+
+int
+__wrap_pthread_mutex_init(pthread_mutex_t *mtx, const pthread_mutexattr_t *attr)
+{
+	if (ut_fake_pthread_mutex_init == 0)
+		return __real_pthread_mutex_init(mtx, attr);
+	else
+		return ut_fake_pthread_mutex_init;
+}
+
 static int
 spdk_cunit_get_test_result(CU_pTest test)
 {

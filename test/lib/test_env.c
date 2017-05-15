@@ -92,16 +92,26 @@ uint64_t spdk_vtophys(void *buf)
 	}
 }
 
+bool ut_fail_memzone_reserve = false;
 void *
 spdk_memzone_reserve(const char *name, size_t len, int socket_id, unsigned flags)
 {
-	return malloc(len);
+	if (ut_fail_memzone_reserve) {
+		return NULL;
+	} else {
+		return malloc(len);
+	}
 }
 
+void *ut_fake_spdk_memzone_lookup = NULL;
 void *
 spdk_memzone_lookup(const char *name)
 {
-	return NULL;
+	if (ut_fake_spdk_memzone_lookup) {
+		return ut_fake_spdk_memzone_lookup;
+	} else {
+		return NULL;
+	}
 }
 
 void
@@ -149,10 +159,11 @@ spdk_mempool_put(struct spdk_mempool *mp, void *ele)
 	free(ele);
 }
 
+bool ut_process_is_primary = true;
 bool
 spdk_process_is_primary(void)
 {
-	return true;
+	return ut_process_is_primary;
 }
 
 uint64_t ut_tsc = 0;
