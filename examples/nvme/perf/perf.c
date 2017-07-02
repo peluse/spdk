@@ -170,6 +170,7 @@ static int g_dpdk_mem;
 static int g_shm_id = -1;
 static uint32_t g_disable_sq_cmb;
 static bool g_no_pci;
+static int g_proc_type = 0;
 
 static const char *g_core_mask;
 
@@ -975,8 +976,11 @@ parse_args(int argc, char **argv)
 	g_core_mask = NULL;
 	g_max_completions = 0;
 
-	while ((op = getopt(argc, argv, "c:d:i:lm:q:r:s:t:w:DLM:")) != -1) {
+	while ((op = getopt(argc, argv, "y:c:d:i:lm:q:r:s:t:w:DLM:")) != -1) {
 		switch (op) {
+		case 'y':
+			g_proc_type = atoi(optarg);
+			break;
 		case 'c':
 			g_core_mask = optarg;
 			break;
@@ -1352,6 +1356,7 @@ int main(int argc, char **argv)
 	if (g_no_pci) {
 		opts.no_pci = g_no_pci;
 	}
+	opts.proc_type = g_proc_type;
 	spdk_env_init(&opts);
 
 	g_tsc_rate = spdk_get_ticks_hz();

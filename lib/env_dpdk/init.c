@@ -44,6 +44,7 @@
 #define SPDK_ENV_DPDK_DEFAULT_MASTER_CORE	-1
 #define SPDK_ENV_DPDK_DEFAULT_MEM_CHANNEL	-1
 #define SPDK_ENV_DPDK_DEFAULT_CORE_MASK		"0x1"
+#define SPDK_ENV_DPDK_DEFAULT_PROC_TYPE		0
 
 static char *
 _sprintf_alloc(const char *format, ...)
@@ -110,6 +111,7 @@ spdk_env_opts_init(struct spdk_env_opts *opts)
 	opts->mem_size = SPDK_ENV_DPDK_DEFAULT_MEM_SIZE;
 	opts->master_core = SPDK_ENV_DPDK_DEFAULT_MASTER_CORE;
 	opts->mem_channel = SPDK_ENV_DPDK_DEFAULT_MEM_CHANNEL;
+	opts->proc_type = SPDK_ENV_DPDK_DEFAULT_PROC_TYPE;
 }
 
 static void
@@ -227,7 +229,19 @@ spdk_build_eal_cmdline(const struct spdk_env_opts *opts, char **out[])
 		}
 
 		/* set the process type */
-		args = spdk_push_arg(args, &argcount, _sprintf_alloc("--proc-type=auto"));
+		if (opts->proc_type == 0) {
+			args = spdk_push_arg(args,
+					     &argcount,
+					     _sprintf_alloc("--proc-type=auto"));
+		} else if (opts->proc_type == 1) {
+			args = spdk_push_arg(args,
+					     &argcount,
+					     _sprintf_alloc("--proc-type=primary"));
+		} else {
+			args = spdk_push_arg(args,
+					     &argcount,
+					     _sprintf_alloc("--proc-type=secondary"));
+		}
 		if (args == NULL) {
 			return -1;
 		}

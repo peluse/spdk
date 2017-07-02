@@ -98,8 +98,8 @@ if [ $(uname -s) = Linux ] && [ $SPDK_TEST_NVME_MULTIPROCESS -eq 1 ]; then
 	while [ $count -le 1 ]; do
 		core=$((1 << (($count + 4))))
 		printf -v hexcore "0x%x" "$core"
-		$rootdir/examples/nvme/perf/perf -i 0 -q 128 -w read -s 4096 -t 1 -c $hexcore &
-		$rootdir/examples/nvme/identify/identify -i 0 &
+		$rootdir/examples/nvme/perf/perf -d 128 -i 0 -y 1 -q 128 -w read -s 4096 -t 1 -c $hexcore &
+		$rootdir/examples/nvme/identify/identify -d 128 -y 2 -i 0 &
 		count=$(($count + 1))
 	done
 	wait $pid

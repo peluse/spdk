@@ -104,7 +104,7 @@ if [ $SPDK_TEST_NVME -eq 1 ]; then
 fi
 
 run_test test/lib/env/env.sh
-
+exit 0
 if [ $SPDK_TEST_IOAT -eq 1 ]; then
 	run_test test/lib/ioat/ioat.sh
 fi

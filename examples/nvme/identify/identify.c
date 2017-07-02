@@ -68,6 +68,8 @@ static int g_dpdk_mem = 64;
 
 static int g_master_core = 0;
 
+static int g_proc_type = 0;
+
 static char g_core_mask[16] = "0x1";
 
 static struct spdk_nvme_transport_id g_trid;
@@ -996,8 +998,11 @@ parse_args(int argc, char **argv)
 	g_trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
 	snprintf(g_trid.subnqn, sizeof(g_trid.subnqn), "%s", SPDK_NVMF_DISCOVERY_NQN);
 
-	while ((op = getopt(argc, argv, "d:i:p:r:t:xH")) != -1) {
+	while ((op = getopt(argc, argv, "y:d:i:p:r:t:xH")) != -1) {
 		switch (op) {
+		case 'y':
+			g_proc_type = atoi(optarg);
+			break;
 		case 'd':
 			g_dpdk_mem = atoi(optarg);
 			break;
@@ -1077,6 +1082,7 @@ int main(int argc, char **argv)
 	opts.mem_channel = 1;
 	opts.master_core = g_master_core;
 	opts.core_mask = g_core_mask;
+	opts.proc_type = g_proc_type;
 	if (g_trid.trtype != SPDK_NVME_TRANSPORT_PCIE) {
 		opts.no_pci = true;
 	}
