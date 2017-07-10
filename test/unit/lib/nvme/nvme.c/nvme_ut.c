@@ -135,7 +135,7 @@ test_nvme_allocate_request_user_copy(void)
 	struct spdk_nvme_qpair qpair;
 	void *buffer = NULL;
 	uint32_t payload_size = 0;
-	spdk_nvme_cmd_cb cb_fn = {0};
+	spdk_nvme_cmd_cb cb_fn = NULL;
 	void *cb_arg = NULL;
 	bool host_to_controller = true;
 	struct nvme_request *req;
@@ -167,7 +167,7 @@ test_nvme_allocate_request_user_copy(void)
 	CU_ASSERT(req->user_cb_arg == cb_arg);
 	CU_ASSERT(req->user_buffer == buffer);
 	CU_ASSERT(req->cb_arg == req);
-	CU_ASSERT(memcmp(req->payload.u.contig, buffer, sizeof(buff_size)) == 0);
+	CU_ASSERT(memcmp(req->payload.u.contig, buffer, buff_size) == 0);
 	spdk_dma_free(req->payload.u.contig);
 
 	/* same thing but additional path coverage, no copy */
@@ -181,7 +181,7 @@ test_nvme_allocate_request_user_copy(void)
 	CU_ASSERT(req->user_cb_arg == cb_arg);
 	CU_ASSERT(req->user_buffer == buffer);
 	CU_ASSERT(req->cb_arg == req);
-	CU_ASSERT(memcmp(req->payload.u.contig, buffer, sizeof(buff_size)) != 0);
+	CU_ASSERT(memcmp(req->payload.u.contig, buffer, buff_size) != 0);
 	spdk_dma_free(req->payload.u.contig);
 
 	/* good buffer and valid payload size but make spdk_dma_zmalloc fail */
