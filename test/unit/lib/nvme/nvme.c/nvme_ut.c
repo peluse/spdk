@@ -135,11 +135,7 @@ test_nvme_allocate_request_user_copy(void)
 	struct spdk_nvme_qpair qpair;
 	void *buffer = NULL;
 	uint32_t payload_size = 0;
-<<<<<<< HEAD
 	spdk_nvme_cmd_cb cb_fn = NULL;
-=======
-	spdk_nvme_cmd_cb cb_fn = {0};
->>>>>>> 150327a... unit test: add coverage for test_nvme_allocate_request_user_copy()
 	void *cb_arg = NULL;
 	bool host_to_controller = true;
 	struct nvme_request *req;
