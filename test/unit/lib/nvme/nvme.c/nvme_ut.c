@@ -117,7 +117,11 @@ test_nvme_allocate_request(void)
 	spdk_nvme_cmd_cb cb_fn = NULL;
 	void *cb_arg = NULL;
 	struct nvme_request *req = NULL;
+<<<<<<< HEAD
 	struct nvme_request match_req, dummy_req;
+=======
+	struct nvme_request match_req;
+>>>>>>> 2ba7603... unit test: add UT coverage for test_nvme_allocate_request()
 
 	memset(&payload, 0, sizeof(struct nvme_payload));
 	STAILQ_INIT(&qpair.free_req);
@@ -138,7 +142,6 @@ test_nvme_allocate_request(void)
 	match_req.qpair = &qpair;
 	match_req.pid = getpid();
 	STAILQ_INSERT_HEAD(&qpair.free_req, &dummy_req, stailq);
-
 	req = nvme_allocate_request(&qpair, &payload, payload_size,
 				    cb_fn, cb_arg);
 	CU_ASSERT(req != NULL);
