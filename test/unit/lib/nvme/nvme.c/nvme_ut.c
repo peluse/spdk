@@ -140,6 +140,10 @@ test_nvme_user_copy_cmd_complete(void)
 	memset(req.user_buffer, 0, buff_size);
 	req.payload_size = buff_size;
 	req.payload.type = NVME_PAYLOAD_TYPE_CONTIG;
+<<<<<<< HEAD
+=======
+	/* code under test will free this */
+>>>>>>> 98140d3... unit test: add coverage for nvme_user_copy_cmd_complete()
 	req.payload.u.contig = malloc(buff_size);
 	SPDK_CU_ASSERT_FATAL(req.payload.u.contig != NULL);
 	memcpy(req.payload.u.contig, &test_data, buff_size);
