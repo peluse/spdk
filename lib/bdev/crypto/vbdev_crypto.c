@@ -96,13 +96,13 @@ struct crypto_io_channel {
 };
 
 struct crypto_bdev_io {
-	int iovcnt_remaining; /* counter when completing crypto ops which are 1:1 with iovecs */
+	int cryop_cnt_remaining; /* counter when completing crypto ops which are 1:1 with iovecs */
 	struct crypto_io_channel *crypto_ch; /* need to store in IO context for read completions */
 	enum rte_crypto_cipher_operation crypto_op; /* the crypto control struct */
 	struct spdk_bdev_io *orig_io; /* the oringinal IO */
 	/* Used for the single contigous buffer that serves as the crypto dest target */
-	uint64_t cry_offset; /* running offset as iovs are processed */
 	uint64_t cry_num_blocks; /* num of blocks for the contigous buffer */
+	uint64_t cry_offset_blocks; /* block offset on media */
 	struct iovec cry_iov; /* iov representing contig buffer */
 };
 
@@ -130,6 +130,7 @@ vbdev_crypto_destruct(void *ctx)
 // TODO: review these, decide on good values
 #define CRYPTO_NUM_QPAIRS 1
 #define CRYPTO_QP_DESCRIPTORS 1024
+#define MAX_CRYOP_LENGTH (1024 * 32)
 #define NUM_SESSIONS 2048
 #define SESS_MEMPOOL_CACHE_SIZE 128
 #define MAX_LIST 1024
@@ -139,7 +140,6 @@ vbdev_crypto_destruct(void *ctx)
 #define AES_CBC_KEY_LENGTH   16
 #define IV_OFFSET            (sizeof(struct rte_crypto_op) + \
 				sizeof(struct rte_crypto_sym_op))
-#define MAX_IOVS 1024
 
 uint8_t g_cipher_key[AES_CBC_KEY_LENGTH] = { 0 } ;
 struct rte_crypto_sym_xform g_cipher_xform = { /* todo, keys */
@@ -182,7 +182,7 @@ _crypto_operation_complete(struct crypto_io_channel *crypto_ch, struct spdk_bdev
 
 		/* Write using our single contiguous encrypted buffer */
 		rc = spdk_bdev_writev_blocks(crypto_node->base_desc, crypto_ch->base_ch,
-					     &io_ctx->cry_iov, 1, 0,
+					     &io_ctx->cry_iov, 1, io_ctx->cry_offset_blocks,
 					     io_ctx->cry_num_blocks, _crypto_complete_io,
 					     bdev_io);
 	}
@@ -194,28 +194,45 @@ _crypto_operation_complete(struct crypto_io_channel *crypto_ch, struct spdk_bdev
 
 }
 
+// TODO: do we have these somewere in spdk?
+#define MIN(a,b) (((a)<(b))?(a):(b))
+#define MAX(a,b) (((a)>(b))?(a):(b))
+
 /* We're either encrypting on the way down or decrypting on the way back. */
 static int
 _crypto_operation(struct spdk_bdev_io *bdev_io, enum rte_crypto_cipher_operation crypto_op)
 {
 	struct rte_cryptodev_sym_session *session;
-	struct rte_crypto_op *crypto_ops[MAX_IOVS];
-	struct rte_mbuf *mbufs[MAX_IOVS];
-	struct rte_mbuf *en_mbufs[MAX_IOVS];
+	struct rte_crypto_op *crypto_ops[NUM_MBUFS];
+	struct rte_mbuf *mbufs[NUM_MBUFS];
+	struct rte_mbuf *en_mbufs[NUM_MBUFS];
 	uint16_t num_enqueued_ops = 0;
-	int iovcnt = bdev_io->u.bdev.iovcnt;
+	int iov_cnt = bdev_io->u.bdev.iovcnt;
+	int cryop_cnt = 1;
 	struct crypto_bdev_io *io_ctx = (struct crypto_bdev_io *)bdev_io->driver_ctx;
 	struct crypto_io_channel *crypto_ch = io_ctx->crypto_ch;
+	uint64_t total_length = bdev_io->u.bdev.num_blocks * crypto_ch->blocklen;
 	int rc;
-	int i;
+	int i, remaining, cry_index = 0;
+	uint32_t offset = 0;
+	uint32_t en_offset = 0;
 
 	/* NOTE: for reads, the bdev_io passed in the the one we created, for writes
 	 * it's the origninal IO. Either way though, the io_ctx will be valid for what
 	 * each respective operation requires.
 	 */
 
-	/* Get an iovcnt worth of crypto ops and mbufs as there's a 1:1 mapping. */
-	rc = rte_mempool_get_bulk(crypto_ch->mbuf_pool, (void **)&mbufs[0], iovcnt);
+	/* The number of cry operations we need depends on the total size of the IO
+	 * and the max data we can process in a single op. We choose the larger of that
+	 * value or the iovec count.
+	 */
+	if (total_length > MAX_CRYOP_LENGTH) {
+		cryop_cnt = total_length / MAX_CRYOP_LENGTH + (total_length % MAX_CRYOP_LENGTH > 0);
+		cryop_cnt = MAX(cryop_cnt, iov_cnt);
+	}
+
+	/* Get the number of crypto ops and mbufs that we need to start with. */
+	rc = rte_mempool_get_bulk(crypto_ch->mbuf_pool, (void **)&mbufs[0], cryop_cnt);
 	if (rc) {
 		SPDK_ERRLOG("ERROR trying to get mbufs!\n");
 		// TODO all error paths.
@@ -224,7 +241,7 @@ _crypto_operation(struct spdk_bdev_io *bdev_io, enum rte_crypto_cipher_operation
 
 	/* Get the same amount but these buffers decribe the encrypted data location. */
 	if (crypto_op == RTE_CRYPTO_CIPHER_OP_ENCRYPT) {
-		rc = rte_mempool_get_bulk(crypto_ch->mbuf_pool, (void **)&en_mbufs[0], iovcnt);
+		rc = rte_mempool_get_bulk(crypto_ch->mbuf_pool, (void **)&en_mbufs[0], cryop_cnt);
 		if (rc) {
 			SPDK_ERRLOG("ERROR trying to get mbufs!\n");
 			// TODO all error paths.
@@ -232,18 +249,17 @@ _crypto_operation(struct spdk_bdev_io *bdev_io, enum rte_crypto_cipher_operation
 		}
 	}
 
-
 	rc = rte_crypto_op_bulk_alloc(crypto_ch->crypto_op_pool,
 				      RTE_CRYPTO_OP_TYPE_SYMMETRIC,
-				      crypto_ops, iovcnt);
-	if (rc < iovcnt) {
+				      crypto_ops, cryop_cnt);
+	if (rc < cryop_cnt) {
 		// TODO: return mbufs to mempool, or try a smaller number or something
 		SPDK_ERRLOG("ERROR trying to get crypto ops!\n");
 		return rc;
 	}
 
-	/* We will decrement this counter in the poller to determine when the bdev_io is done. */
-	io_ctx->iovcnt_remaining = iovcnt;
+	/* We will decrement this counter in the poller to determine when this bdev_io is done. */
+	io_ctx->cryop_cnt_remaining = cryop_cnt;
 
 	session = rte_cryptodev_sym_session_create(crypto_ch->session_mp);
 	if (NULL == session) {
@@ -262,73 +278,87 @@ _crypto_operation(struct spdk_bdev_io *bdev_io, enum rte_crypto_cipher_operation
 		return rc;
 	}
 
-	/* For encryption, we need to sprepare a single contiguous buffer as the decryption
-	 * destination, we'll then pass that along for the write.
+	/* For encryption, we need to prepare a single contiguous buffer as the encryption
+	 * destination, we'll then pass that along for the write after encryption is done.
 	 */
 	if (crypto_op == RTE_CRYPTO_CIPHER_OP_ENCRYPT) {
-		io_ctx->cry_iov.iov_len = bdev_io->u.bdev.num_blocks * crypto_ch->blocklen;
-		io_ctx->cry_iov.iov_base = spdk_dma_malloc(io_ctx->cry_iov.iov_len, 0x1000, NULL);
-		io_ctx->cry_offset = 0;
+		io_ctx->cry_iov.iov_len = total_length;
+		io_ctx->cry_iov.iov_base = spdk_dma_malloc(total_length, 0x1000, NULL);
+		io_ctx->cry_offset_blocks = bdev_io->u.bdev.offset_blocks;
 		io_ctx->cry_num_blocks = bdev_io->u.bdev.num_blocks;
 	}
 
-	/* Walk through bdev iovs and build up one mbuf for each iov */
-	for (i = 0; i < iovcnt; i++) {
-		struct rte_crypto_op *op = crypto_ops[i];
+	/* Walk through bdev iovs and build up one or more mbufs for each iov */
+	for (i = 0; i < iov_cnt; i++) {
 
-		/* Point the mbuf data_addr to the bdev io vector, this is the only element
-		 * in the mbuf structure that we use other than IO context. Length is kepy in
-		 * the crypto op.
+		/* Build as many mbufs as we need per iovec taking into account the
+		 * max data we can put in one crypto operation.
 		 */
-		mbufs[i]->buf_addr = bdev_io->u.bdev.iovs[i].iov_base;
+		remaining = bdev_io->u.bdev.iovs[i].iov_len;
+		offset = 0;
+		do {
+			struct rte_crypto_op *op = crypto_ops[cry_index];
 
-		/* Set the data to encrypt/decrypt length */
-		crypto_ops[i]->sym->cipher.data.length = bdev_io->u.bdev.iovs[i].iov_len;
-		crypto_ops[i]->sym->cipher.data.offset = 0;
-
-		/* Store context in every mbuf as we don't know aything about completion order */
-		mbufs[i]->userdata = bdev_io;
-
-		/* link the mbuf to the crypto op for source. */
-		crypto_ops[i]->sym->m_src = mbufs[i];
-
-
-		/* For encrypt, point the dest to a buffer we allocate and redirect the bdev_io
-		 * that will be used the process the write on completion to the same buffer.
-		 */
-		if (crypto_op == RTE_CRYPTO_CIPHER_OP_ENCRYPT) {
-
-			/* Set dest crypto mbuf to offset within contig buffer for write
-			 * and increment for the next iov keeping our running offet in the io_ctx.
+			/* Point the mbuf data_addr to the bdev io vector, this is the only element
+			 * in the mbuf structure that we use other than IO context. Length is kept in
+			 * the crypto op.
 			 */
-			en_mbufs[i]->buf_addr = io_ctx->cry_iov.iov_base + io_ctx->cry_offset;
-			crypto_ops[i]->sym->m_dst = en_mbufs[i];
-			io_ctx->cry_offset += bdev_io->u.bdev.iovs[i].iov_len;
-		}
+			mbufs[cry_index]->buf_addr = bdev_io->u.bdev.iovs[i].iov_base + offset;
 
-		/* Set the IV */
-		uint8_t *iv_ptr = rte_crypto_op_ctod_offset(op, uint8_t *,
-				  IV_OFFSET);
+			/* Set the data to encrypt/decrypt length */
+			crypto_ops[cry_index]->sym->cipher.data.length = MIN(remaining, MAX_CRYOP_LENGTH);
+			remaining -= crypto_ops[cry_index]->sym->cipher.data.length;
+			assert(remaining >= 0);
 
-		// TODO: replace this with spdk random function
-		*iv_ptr = 5;
-		//generate_random_bytes(iv_ptr, AES_CBC_IV_LENGTH);
+			offset += crypto_ops[cry_index]->sym->cipher.data.length;
+			crypto_ops[cry_index]->sym->cipher.data.offset = 0;
 
-		/* Attach the crypto session to the operation */
-		rc = rte_crypto_op_attach_sym_session(op, session);
-		if (rc) {
-			// TODO: return stuff to mempool
-			SPDK_ERRLOG("ERROR trying to attach to crypto session!\n");
-			return rc;
-		}
+			/* Store context in every mbuf as we don't know aything about completion order */
+			mbufs[cry_index]->userdata = bdev_io;
+
+			/* link the mbuf to the crypto op for source. */
+			crypto_ops[cry_index]->sym->m_src = mbufs[cry_index];
+
+			/* For encrypt, point the dest to a buffer we allocate and redirect the bdev_io
+			 * that will be used the process the write on completion to the same buffer.
+			 */
+			if (crypto_op == RTE_CRYPTO_CIPHER_OP_ENCRYPT) {
+
+				/* Set dest crypto mbuf to offset within contig buffer for write
+				 * and increment for the next iov keeping our running offet in the io_ctx.
+				 */
+				en_mbufs[cry_index]->buf_addr = io_ctx->cry_iov.iov_base + en_offset;
+				crypto_ops[cry_index]->sym->m_dst = en_mbufs[cry_index];
+				en_offset += crypto_ops[cry_index]->sym->cipher.data.length;
+			}
+
+			/* Set the IV */
+			uint8_t *iv_ptr = rte_crypto_op_ctod_offset(op, uint8_t *, IV_OFFSET);
+
+			// TODO: replace this with spdk random function
+			*iv_ptr = 5;
+			//generate_random_bytes(iv_ptr, AES_CBC_IV_LENGTH);
+
+			/* Attach the crypto session to the operation */
+			rc = rte_crypto_op_attach_sym_session(op, session);
+			if (rc) {
+				// TODO: return stuff to mempool
+				SPDK_ERRLOG("ERROR trying to attach to crypto session!\n");
+				return rc;
+			}
+
+			/* Increment index into crypto arrays, operations and mbufs. */
+			cry_index++;
+		} while (remaining > 0);
 	}
 
 	num_enqueued_ops = rte_cryptodev_enqueue_burst(crypto_ch->cdev_id, 0,
-			   crypto_ops, iovcnt);
-
-	assert(num_enqueued_ops == iovcnt);
+			   crypto_ops, cryop_cnt);
 	// TODO: if this can happen probably need to loop on a smaller number of ops?
 	// or just explode or what?
+
+	assert(num_enqueued_ops == cryop_cnt);
+	assert(cryop_cnt == cry_index);
 
 	return rc;
 }
@@ -393,8 +423,14 @@ vbdev_crypto_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bde
 	struct crypto_bdev_io *io_ctx = (struct crypto_bdev_io *)bdev_io->driver_ctx;
 	int rc = 1;
 
+	memset(io_ctx, 0, sizeof(struct crypto_bdev_io));
+
 	switch (bdev_io->type) {
 	case SPDK_BDEV_IO_TYPE_READ:
+
+		// TODO: when the iov incoming is NULL we need to allocate our own buffer
+		// and decrypt there as dest, then update th IOC.  However, who frees it
+		// and when??
 		io_ctx->crypto_ch = crypto_ch;
 		io_ctx->orig_io = bdev_io;
 		rc = spdk_bdev_readv_blocks(crypto_node->base_desc, crypto_ch->base_ch, bdev_io->u.bdev.iovs,
@@ -407,13 +443,8 @@ vbdev_crypto_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bde
 		rc = _crypto_operation(bdev_io, RTE_CRYPTO_CIPHER_OP_ENCRYPT);
 
 		break;
-	case SPDK_BDEV_IO_TYPE_WRITE_ZEROES:
-		rc = spdk_bdev_write_zeroes_blocks(crypto_node->base_desc, crypto_ch->base_ch,
-						   bdev_io->u.bdev.offset_blocks,
-						   bdev_io->u.bdev.num_blocks,
-						   _crypto_complete_io, bdev_io);
-		break;
 	case SPDK_BDEV_IO_TYPE_UNMAP:
+		raise(SIGINT);
 		rc = spdk_bdev_unmap_blocks(crypto_node->base_desc, crypto_ch->base_ch,
 					    bdev_io->u.bdev.offset_blocks,
 					    bdev_io->u.bdev.num_blocks,
@@ -429,6 +460,7 @@ vbdev_crypto_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bde
 		rc = spdk_bdev_reset(crypto_node->base_desc, crypto_ch->base_ch,
 				     _crypto_complete_io, bdev_io);
 		break;
+	case SPDK_BDEV_IO_TYPE_WRITE_ZEROES:
 	default:
 		SPDK_ERRLOG("crypto: unknown I/O type %d\n", bdev_io->type);
 		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
@@ -450,6 +482,12 @@ vbdev_crypto_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
 {
 	struct crypto_nodes *crypto_node = (struct crypto_nodes *)ctx;
 
+	/* Force the bdev layer to issue actual writes of zeroes so we can
+	 * encrypt them as regular writes.
+	 */
+	if (io_type == SPDK_BDEV_IO_TYPE_WRITE_ZEROES) {
+		return false;
+	}
 	return spdk_bdev_io_type_supported(crypto_node->base_bdev, io_type);
 }
 
@@ -465,10 +503,10 @@ crypto_pmd_poller(void *args)
 	uint16_t i, num_dequeued_ops;
 	struct spdk_bdev_io *bdev_io = NULL;
 	struct crypto_bdev_io *io_ctx = NULL;
-	struct rte_crypto_op *dequeued_ops[MAX_IOVS];
+	struct rte_crypto_op *dequeued_ops[NUM_MBUFS];
 
 	num_dequeued_ops = rte_cryptodev_dequeue_burst(crypto_ch->cdev_id, 0,
-			   dequeued_ops, MAX_IOVS);
+			   dequeued_ops, NUM_MBUFS);
 
 	/* Check if operation was processed successfully */
 	for (i = 0; i < num_dequeued_ops; i++) {
@@ -484,7 +522,7 @@ crypto_pmd_poller(void *args)
 		bdev_io = (struct spdk_bdev_io *)dequeued_ops[i]->sym->m_src->userdata;
 		assert(bdev_io != NULL);
 		io_ctx = (struct crypto_bdev_io *)bdev_io->driver_ctx;
-		assert(io_ctx->iovcnt_remaining > 0);
+		assert(io_ctx->cryop_cnt_remaining > 0);
 
 		/* return the assicated mbuf */
 		rte_mempool_put(crypto_ch->mbuf_pool, dequeued_ops[i]->sym->m_src);
@@ -497,7 +535,7 @@ crypto_pmd_poller(void *args)
 		}
 
 		/* done encrypting complete bdev_io */
-		if (--io_ctx->iovcnt_remaining == 0) {
+		if (--io_ctx->cryop_cnt_remaining == 0) {
 
 			/* do the bdev_io operation */
 			_crypto_operation_complete(crypto_ch, bdev_io, io_ctx->crypto_op);

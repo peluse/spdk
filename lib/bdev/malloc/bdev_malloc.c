@@ -249,6 +249,7 @@ static int _bdev_malloc_submit_request(struct spdk_io_channel *ch, struct spdk_b
 	switch (bdev_io->type) {
 	case SPDK_BDEV_IO_TYPE_READ:
 		if (bdev_io->u.bdev.iovs[0].iov_base == NULL) {
+			raise(SIGINT);
 			assert(bdev_io->u.bdev.iovcnt == 1);
 			bdev_io->u.bdev.iovs[0].iov_base =
 				((struct malloc_disk *)bdev_io->bdev->ctxt)->malloc_buf +
