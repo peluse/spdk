@@ -1117,6 +1117,7 @@ static void
 spdk_bs_batch_clear_dev(struct spdk_blob_persist_ctx *ctx, spdk_bs_batch_t *batch, uint64_t lba,
 			uint32_t lba_count)
 {
+	SPDK_NOTICELOG("Using CM %u\n", ctx->blob->clear_method);
 	switch (ctx->blob->clear_method) {
 	case BLOB_CLEAR_WITH_DEFAULT:
 	case BLOB_CLEAR_WITH_UNMAP:
@@ -2736,6 +2737,7 @@ _spdk_blob_set_thin_provision(struct spdk_blob *blob)
 static void
 _spdk_blob_set_clear_method(struct spdk_blob *blob, enum blob_clear_method clear_method)
 {
+	SPDK_NOTICELOG("Set CM  in metadata %u\n", clear_method);
 	_spdk_blob_verify_md_op(blob);
 	blob->md_ro_flags |= (clear_method << SPDK_BLOB_CLEAR_METHOD_SHIFT);
 }
@@ -3900,7 +3902,7 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 
 	/* Clear metadata space */
 	spdk_bs_batch_write_zeroes_dev(batch, 0, num_md_lba);
-
+	SPDK_NOTICELOG("use CM   %u\n", opts.clear_method);
 	switch (opts.clear_method) {
 	case BS_CLEAR_WITH_UNMAP:
 		/* Trim data clusters */
@@ -6360,11 +6362,13 @@ _spdk_blob_update_clear_method(struct spdk_blob *blob)
 
 	if (blob->clear_method == BLOB_CLEAR_WITH_DEFAULT) {
 		blob->clear_method = stored_cm;
+		SPDK_NOTICELOG("Updating CM in metadata %u\n", blob->clear_method);
 	} else {
 		if (blob->clear_method != stored_cm) {
 			SPDK_WARNLOG("Using passed in clear method 0x%x instead of stored value of 0x%x\n",
 				     blob->clear_method, stored_cm);
 		}
+		SPDK_NOTICELOG("Using CM from metadata %u\n", blob->clear_method);
 	}
 }
 

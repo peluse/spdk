@@ -145,7 +145,7 @@ spdk_lvol_open(struct spdk_lvol *lvol, spdk_lvol_op_with_handle_complete cb_fn, 
 
 	spdk_blob_open_opts_init(&opts);
 	opts.clear_method = lvol->clear_method;
-
+	SPDK_NOTICELOG("Open bloc with CM %u\n", lvol->clear_method);
 	spdk_bs_open_blob_ext(lvol->lvol_store->blobstore, lvol->blob_id, &opts, _spdk_lvol_open_cb, req);
 }
 
@@ -963,7 +963,7 @@ _spdk_lvol_create_cb(void *cb_arg, spdk_blob_id blobid, int lvolerrno)
 	spdk_blob_open_opts_init(&opts);
 	opts.clear_method = req->lvol->clear_method;
 	bs = req->lvol->lvol_store->blobstore;
-
+	SPDK_NOTICELOG("Open bloc with CM %u\n", req->lvol->clear_method);
 	spdk_bs_open_blob_ext(bs, blobid, &opts, _spdk_lvol_create_open_cb, req);
 }
 
@@ -1071,7 +1071,7 @@ spdk_lvol_create(struct spdk_lvol_store *lvs, const char *name, uint64_t sz,
 	opts.xattrs.names = xattr_names;
 	opts.xattrs.ctx = lvol;
 	opts.xattrs.get_value = spdk_lvol_get_xattr_value;
-
+	SPDK_NOTICELOG("Create bloc with CM %u\n", lvol->clear_method);
 	spdk_bs_create_blob_ext(lvs->blobstore, &opts, _spdk_lvol_create_cb, req);
 
 	return 0;
